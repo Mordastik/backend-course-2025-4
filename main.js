@@ -1,44 +1,84 @@
+// main.js
 
-const { Command } = require('commander');
-const fs = require('fs/promises');
-const http = require('http');
+import { Command } from 'commander';
+import http from 'http';
+import fs from 'fs';
+import { XMLBuilder } from 'fast-xml-parser';
+import url from 'url';
 
 const program = new Command();
 
 program
-  .requiredOption('-i, --input <path>', ' до  JSON з  ()')
-  .requiredOption('-h, --host <address>', '  ()')
-  .requiredOption('-p, --port <number>', '  ()')
-  .parse(process.argv);
+  .requiredOption('-i, --input <path>', 'input JSON file path')
+  .requiredOption('-h, --host <host>', 'server host')
+  .requiredOption('-p, --port <port>', 'server port');
+
+program.parse(process.argv);
 
 const options = program.opts();
 
-async function checkInputFile(filePath) {
+// Перевірка наявності файлу
+if (!fs.existsSync(options.input)) {
+  console.error("Cannot find input file");
+  process.exit(1);
+}
+
+// Створення сервера
+const server = http.createServer(async (req, res) => {
+  const query = url.parse(req.url, true).query;
+
+  try {
+const data = await fs.promises.readFile(options.input, 'utf-8');
+
+// Розбиваємо файл на рядки, кожен парсимо окремо
+let flights = data
+  .split("\n")
+  .filter(line => line.trim() !== "")
+  .map(line => {
     try {
-        await fs.access(filePath);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            console.error("Cannot find input file");
-            process.exit(1);
-        }
-        throw error;
+      return JSON.parse(line);
+    } catch {
+      return null;
     }
-}
+  })
+  .filter(item => item !== null);
 
-async function startServer() {
-    await checkInputFile(options.input);
+    // Якщо дані — це об’єкт з ключем (наприклад, {"flights": [...]})
+    if (!Array.isArray(flights)) {
+      flights = flights.flights || Object.values(flights);
+    }
 
-    const server = http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end(`Server is running at ${options.host}:${options.port}.`);
+    // Фільтрація за параметрами URL
+    if (query.airtime_min) {
+      const minTime = Number(query.airtime_min);
+      flights = flights.filter(f => Number(f.AIR_TIME) > minTime);
+    }
+
+    // Формування об’єктів для XML
+    const result = flights.map(f => {
+      const obj = {
+        air_time: f.AIR_TIME,
+        distance: f.DISTANCE
+      };
+      if (query.date === 'true') obj.date = f.FL_DATE;
+      return obj;
     });
 
-    server.listen(options.port, options.host, () => {
-        console.log(`Server running at http://${options.host}:${options.port}/`);
-    });
-}
+    // Побудова XML
+    const builder = new XMLBuilder({ format: true });
+    const xml = builder.build({ flights: { flight: result } });
 
-startServer().catch(err => {
-    console.error("An error occurred during server startup:", err.message);
-    process.exit(1);
+    // Відправка відповіді
+    res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8' });
+    res.end(xml);
+
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Error reading or processing file');
+  }
+});
+
+// Запуск сервера
+server.listen(options.port, options.host, () => {
+  console.log(`Server running at http://${options.host}:${options.port}/`);
 });
